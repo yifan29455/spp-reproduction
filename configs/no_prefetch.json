@@ -1,0 +1,1 @@
+{"executable_name":"spp-no-prefetch","L2C":{"prefetcher":"no"},"LLC":{"prefetcher":"no"}}
