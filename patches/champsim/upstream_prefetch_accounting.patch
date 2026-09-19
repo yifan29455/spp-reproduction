@@ -1,0 +1,85 @@
+--- a/src/cache.cc
++++ b/src/cache.cc
+@@ -343,6 +343,7 @@
+       // Mark the prefetch as useful
+       if (fill_entry->prefetch_from_this) {
+         ++sim_stats.pf_useful;
++        ++sim_stats.pf_late_useful;
+       }
+     }
+ 
+@@ -393,8 +394,15 @@
+ template <bool UpdateRequest>
+ auto CACHE::initiate_tag_check(champsim::channel* ul)
+ {
+-  return [time = current_time + (warmup ? champsim::chrono::clock::duration{} : HIT_LATENCY), ul](const auto& entry) {
++  return [this, time = current_time + (warmup ? champsim::chrono::clock::duration{} : HIT_LATENCY), ul](const auto& entry) {
+     CACHE::tag_lookup_type retval{entry};
++    if constexpr (UpdateRequest) {
++      if (entry.type == access_type::PREFETCH) {
++        // Preserve the prefetch lifecycle as an upstream prefetch fills this cache.
++        retval.prefetch_from_this = true;
++        ++sim_stats.pf_upstream_received;
++      }
++    }
+     retval.event_cycle = time;
+ 
+     if constexpr (UpdateRequest) {
+@@ -871,6 +879,8 @@
+   roi_stats.pf_issued = sim_stats.pf_issued;
+   roi_stats.pf_useful = sim_stats.pf_useful;
+   roi_stats.pf_useless = sim_stats.pf_useless;
++  roi_stats.pf_late_useful = sim_stats.pf_late_useful;
++  roi_stats.pf_upstream_received = sim_stats.pf_upstream_received;
+   roi_stats.pf_fill = sim_stats.pf_fill;
+ 
+   for (auto* ul : upper_levels) {
+--- a/inc/cache_stats.h
++++ b/inc/cache_stats.h
+@@ -16,6 +16,8 @@
+   uint64_t pf_issued = 0;
+   uint64_t pf_useful = 0;
+   uint64_t pf_useless = 0;
++  uint64_t pf_late_useful = 0;
++  uint64_t pf_upstream_received = 0;
+   uint64_t pf_fill = 0;
+ 
+   champsim::stats::event_counter<std::pair<access_type, std::remove_cv_t<decltype(NUM_CPUS)>>> hits = {};
+--- a/src/cache_stats.cc
++++ b/src/cache_stats.cc
+@@ -7,6 +7,8 @@
+   result.pf_issued = lhs.pf_issued - rhs.pf_issued;
+   result.pf_useful = lhs.pf_useful - rhs.pf_useful;
+   result.pf_useless = lhs.pf_useless - rhs.pf_useless;
++  result.pf_late_useful = lhs.pf_late_useful - rhs.pf_late_useful;
++  result.pf_upstream_received = lhs.pf_upstream_received - rhs.pf_upstream_received;
+   result.pf_fill = lhs.pf_fill - rhs.pf_fill;
+ 
+   result.hits = lhs.hits - rhs.hits;
+--- a/src/json_printer.cc
++++ b/src/json_printer.cc
+@@ -50,7 +50,10 @@
+   statsmap.emplace("prefetch requested", stats.pf_requested);
+   statsmap.emplace("prefetch issued", stats.pf_issued);
+   statsmap.emplace("useful prefetch", stats.pf_useful);
++  statsmap.emplace("late useful prefetch", stats.pf_late_useful);
+   statsmap.emplace("useless prefetch", stats.pf_useless);
++  statsmap.emplace("prefetch fill", stats.pf_fill);
++  statsmap.emplace("upstream prefetch received", stats.pf_upstream_received);
+ 
+   uint64_t total_downstream_demands = stats.fill.total();
+   for (std::size_t cpu = 0; cpu < NUM_CPUS; ++cpu)
+--- a/src/plain_printer.cc
++++ b/src/plain_printer.cc
+@@ -116,8 +116,9 @@
+                       stats.miss_merge.value_or(std::pair{type, cpu}, miss_merge_value_type{})));
+     }
+ 
+-    lines.push_back(fmt::format("cpu{}->{} PREFETCH REQUESTED: {:10} ISSUED: {:10} USEFUL: {:10} USELESS: {:10}", cpu, stats.name, stats.pf_requested,
+-                                stats.pf_issued, stats.pf_useful, stats.pf_useless));
++    lines.push_back(fmt::format("cpu{}->{} PREFETCH REQUESTED: {:10} ISSUED: {:10} USEFUL: {:10} LATE_USEFUL: {:10} USELESS: {:10} UPSTREAM: {:10}", cpu,
++                                stats.name, stats.pf_requested, stats.pf_issued, stats.pf_useful, stats.pf_late_useful, stats.pf_useless,
++                                stats.pf_upstream_received));
+ 
+     uint64_t total_downstream_demands = total_fill - stats.fill.value_or(std::pair{access_type::PREFETCH, cpu}, fill_value_type{});
+     lines.push_back(
