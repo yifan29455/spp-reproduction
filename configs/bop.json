@@ -1,0 +1,10 @@
+{
+  "executable_name": "bop",
+  "L2C": {
+    "prefetcher": "bop",
+    "prefetch_activate": "LOAD,RFO,PREFETCH"
+  },
+  "LLC": {
+    "prefetcher": "no"
+  }
+}
