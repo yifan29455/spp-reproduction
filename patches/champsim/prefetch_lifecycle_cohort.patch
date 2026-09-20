@@ -1,0 +1,436 @@
+--- a/inc/block.h
++++ b/inc/block.h
+@@ -24,6 +24,7 @@
+ struct cache_block {
+   bool valid = false;
+   bool prefetch = false;
++  bool prefetch_created_in_roi = false;
+   bool dirty = false;
+ 
+   champsim::address address{};
+--- a/inc/channel.h
++++ b/inc/channel.h
+@@ -48,6 +48,9 @@
+   struct request {
+     bool is_translated = true;
+     bool response_requested = true;
++    // True when the prefetch request was generated during the measured ROI.
++    // This origin bit follows the request through every cache level.
++    bool prefetch_created_in_roi = false;
+ 
+     uint8_t asid[2] = {std::numeric_limits<uint8_t>::max(), std::numeric_limits<uint8_t>::max()};
+     access_type type{access_type::LOAD};
+--- a/inc/cache_stats.h
++++ b/inc/cache_stats.h
+@@ -20,6 +20,43 @@
+   uint64_t pf_upstream_received = 0;
+   uint64_t pf_fill = 0;
+ 
++  // Prefetch API/request attempts that did not create a new local MSHR transaction.
++  uint64_t pf_attempt_pq_rejected = 0;
++  uint64_t pf_attempt_hit_existing = 0;
++  uint64_t pf_attempt_merged_prefetch = 0;
++  uint64_t pf_attempt_merged_demand = 0;
++  uint64_t pf_attempt_mshr_rejected = 0;
++  uint64_t pf_attempt_lower_queue_rejected = 0;
++  uint64_t pf_attempt_no_local_fill = 0;
++
++  // Per-cache transaction cohort created by ROI-originated prefetches.
++  // Conservation: created = timely + late + unused + unresolved.
++  uint64_t pf_roi_cohort_created = 0;
++  uint64_t pf_roi_cohort_timely = 0;
++  uint64_t pf_roi_cohort_late = 0;
++  uint64_t pf_roi_cohort_unused = 0;
++  uint64_t pf_roi_cohort_unused_evicted = 0;
++  uint64_t pf_roi_cohort_unused_invalidated = 0;
++  uint64_t pf_roi_cohort_unused_other = 0;
++  uint64_t pf_roi_cohort_unresolved_end = 0;
++  uint64_t pf_roi_cohort_balance_error = 0;
++
++  // Warmup-origin activity crossing into ROI is reported separately, not
++  // mixed into the ROI-created cohort denominator.
++  uint64_t pf_warmup_active_transactions_roi_start = 0;
++  uint64_t pf_warmup_pending_requests_roi_start = 0;
++  uint64_t pf_warmup_transactions_created_roi = 0;
++  uint64_t pf_warmup_timely_roi = 0;
++  uint64_t pf_warmup_late_roi = 0;
++  uint64_t pf_warmup_unused_roi = 0;
++  uint64_t pf_warmup_unused_evicted_roi = 0;
++  uint64_t pf_warmup_unused_invalidated_roi = 0;
++  uint64_t pf_warmup_unused_other_roi = 0;
++  uint64_t pf_warmup_pending_requests_roi_end = 0;
++  uint64_t pf_warmup_unresolved_roi_end = 0;
++  uint64_t pf_warmup_cohort_balance_error_roi = 0;
++  uint64_t pf_roi_pending_requests_roi_end = 0;
++
+   champsim::stats::event_counter<std::pair<access_type, std::remove_cv_t<decltype(NUM_CPUS)>>> hits = {};
+   champsim::stats::event_counter<std::pair<access_type, std::remove_cv_t<decltype(NUM_CPUS)>>> misses = {};
+   champsim::stats::event_counter<std::pair<access_type, std::remove_cv_t<decltype(NUM_CPUS)>>> miss_merge = {};
+--- a/inc/cache.h
++++ b/inc/cache.h
+@@ -69,6 +69,7 @@
+ 
+     access_type type;
+     bool prefetch_from_this;
++    bool prefetch_created_in_roi;
+     bool skip_fill;
+     bool is_translated;
+     bool translate_issued = false;
+@@ -100,6 +101,7 @@
+ 
+     access_type type;
+     bool prefetch_from_this;
++    bool prefetch_created_in_roi;
+ 
+     uint8_t asid[2] = {std::numeric_limits<uint8_t>::max(), std::numeric_limits<uint8_t>::max()};
+ 
+@@ -144,6 +146,9 @@
+ 
+   auto matches_address(champsim::address address) const;
+   std::pair<fill_type, request_type> mshr_and_forward_packet(const tag_lookup_type& handle_pkt);
++  void record_prefetch_event(bool roi_origin, uint64_t cache_stats::* roi_counter, uint64_t cache_stats::* warmup_counter);
++  std::size_t count_pending_prefetch_requests(bool roi_origin) const;
++  std::size_t count_warmup_prefetch_transactions() const;
+ 
+   std::deque<tag_lookup_type> internal_PQ{};
+   std::deque<tag_lookup_type> inflight_tag_check{};
+--- a/src/cache_stats.cc
++++ b/src/cache_stats.cc
+@@ -10,6 +10,35 @@
+   result.pf_late_useful = lhs.pf_late_useful - rhs.pf_late_useful;
+   result.pf_upstream_received = lhs.pf_upstream_received - rhs.pf_upstream_received;
+   result.pf_fill = lhs.pf_fill - rhs.pf_fill;
++  result.pf_attempt_pq_rejected = lhs.pf_attempt_pq_rejected - rhs.pf_attempt_pq_rejected;
++  result.pf_attempt_hit_existing = lhs.pf_attempt_hit_existing - rhs.pf_attempt_hit_existing;
++  result.pf_attempt_merged_prefetch = lhs.pf_attempt_merged_prefetch - rhs.pf_attempt_merged_prefetch;
++  result.pf_attempt_merged_demand = lhs.pf_attempt_merged_demand - rhs.pf_attempt_merged_demand;
++  result.pf_attempt_mshr_rejected = lhs.pf_attempt_mshr_rejected - rhs.pf_attempt_mshr_rejected;
++  result.pf_attempt_lower_queue_rejected = lhs.pf_attempt_lower_queue_rejected - rhs.pf_attempt_lower_queue_rejected;
++  result.pf_attempt_no_local_fill = lhs.pf_attempt_no_local_fill - rhs.pf_attempt_no_local_fill;
++  result.pf_roi_cohort_created = lhs.pf_roi_cohort_created - rhs.pf_roi_cohort_created;
++  result.pf_roi_cohort_timely = lhs.pf_roi_cohort_timely - rhs.pf_roi_cohort_timely;
++  result.pf_roi_cohort_late = lhs.pf_roi_cohort_late - rhs.pf_roi_cohort_late;
++  result.pf_roi_cohort_unused = lhs.pf_roi_cohort_unused - rhs.pf_roi_cohort_unused;
++  result.pf_roi_cohort_unused_evicted = lhs.pf_roi_cohort_unused_evicted - rhs.pf_roi_cohort_unused_evicted;
++  result.pf_roi_cohort_unused_invalidated = lhs.pf_roi_cohort_unused_invalidated - rhs.pf_roi_cohort_unused_invalidated;
++  result.pf_roi_cohort_unused_other = lhs.pf_roi_cohort_unused_other - rhs.pf_roi_cohort_unused_other;
++  result.pf_roi_cohort_unresolved_end = lhs.pf_roi_cohort_unresolved_end - rhs.pf_roi_cohort_unresolved_end;
++  result.pf_roi_cohort_balance_error = lhs.pf_roi_cohort_balance_error - rhs.pf_roi_cohort_balance_error;
++  result.pf_warmup_active_transactions_roi_start = lhs.pf_warmup_active_transactions_roi_start - rhs.pf_warmup_active_transactions_roi_start;
++  result.pf_warmup_pending_requests_roi_start = lhs.pf_warmup_pending_requests_roi_start - rhs.pf_warmup_pending_requests_roi_start;
++  result.pf_warmup_transactions_created_roi = lhs.pf_warmup_transactions_created_roi - rhs.pf_warmup_transactions_created_roi;
++  result.pf_warmup_timely_roi = lhs.pf_warmup_timely_roi - rhs.pf_warmup_timely_roi;
++  result.pf_warmup_late_roi = lhs.pf_warmup_late_roi - rhs.pf_warmup_late_roi;
++  result.pf_warmup_unused_roi = lhs.pf_warmup_unused_roi - rhs.pf_warmup_unused_roi;
++  result.pf_warmup_unused_evicted_roi = lhs.pf_warmup_unused_evicted_roi - rhs.pf_warmup_unused_evicted_roi;
++  result.pf_warmup_unused_invalidated_roi = lhs.pf_warmup_unused_invalidated_roi - rhs.pf_warmup_unused_invalidated_roi;
++  result.pf_warmup_unused_other_roi = lhs.pf_warmup_unused_other_roi - rhs.pf_warmup_unused_other_roi;
++  result.pf_warmup_pending_requests_roi_end = lhs.pf_warmup_pending_requests_roi_end - rhs.pf_warmup_pending_requests_roi_end;
++  result.pf_warmup_unresolved_roi_end = lhs.pf_warmup_unresolved_roi_end - rhs.pf_warmup_unresolved_roi_end;
++  result.pf_warmup_cohort_balance_error_roi = lhs.pf_warmup_cohort_balance_error_roi - rhs.pf_warmup_cohort_balance_error_roi;
++  result.pf_roi_pending_requests_roi_end = lhs.pf_roi_pending_requests_roi_end - rhs.pf_roi_pending_requests_roi_end;
+ 
+   result.hits = lhs.hits - rhs.hits;
+   result.misses = lhs.misses - rhs.misses;
+--- a/src/cache.cc
++++ b/src/cache.cc
+@@ -94,13 +94,13 @@
+ 
+ CACHE::tag_lookup_type::tag_lookup_type(const request_type& req, bool local_pref, bool skip)
+     : address(req.address), v_address(req.v_address), data(req.data), ip(req.ip), instr_id(req.instr_id), pf_metadata(req.pf_metadata), cpu(req.cpu),
+-      type(req.type), prefetch_from_this(local_pref), skip_fill(skip), is_translated(req.is_translated), instr_depend_on_me(req.instr_depend_on_me)
++      type(req.type), prefetch_from_this(local_pref), prefetch_created_in_roi(req.prefetch_created_in_roi), skip_fill(skip), is_translated(req.is_translated), instr_depend_on_me(req.instr_depend_on_me)
+ {
+ }
+ 
+ CACHE::fill_type::fill_type(const tag_lookup_type& req, champsim::chrono::clock::time_point _time_enqueued)
+     : address(req.address), v_address(req.v_address), ip(req.ip), instr_id(req.instr_id), cpu(req.cpu), type(req.type),
+-      prefetch_from_this(req.prefetch_from_this), time_enqueued(_time_enqueued), instr_depend_on_me(req.instr_depend_on_me), to_return(req.to_return)
++      prefetch_from_this(req.prefetch_from_this), prefetch_created_in_roi(req.prefetch_created_in_roi), time_enqueued(_time_enqueued), instr_depend_on_me(req.instr_depend_on_me), to_return(req.to_return)
+ {
+ }
+ 
+@@ -145,6 +145,7 @@
+   to_fill.prefetch = fill.prefetch_from_this;
+   to_fill.dirty = (fill.type == access_type::WRITE);
+   to_fill.address = fill.address;
++  to_fill.prefetch_created_in_roi = fill.prefetch_from_this && fill.prefetch_created_in_roi;
+   to_fill.v_address = fill.v_address;
+   to_fill.data = fill.data_promise->data;
+   to_fill.pf_metadata = metadata;
+@@ -152,6 +153,36 @@
+   return to_fill;
+ }
+ 
++void CACHE::record_prefetch_event(bool roi_origin, uint64_t cache_stats::* roi_counter, uint64_t cache_stats::* warmup_counter)
++{
++  if (roi_origin)
++    ++(sim_stats.*roi_counter);
++  else if (!warmup)
++    ++(sim_stats.*warmup_counter);
++}
++
++std::size_t CACHE::count_pending_prefetch_requests(bool roi_origin) const
++{
++  auto matches_origin = [roi_origin](const auto& entry) {
++    return entry.type == access_type::PREFETCH && entry.prefetch_created_in_roi == roi_origin;
++  };
++  auto count_in = [&matches_origin](const auto& queue) { return static_cast<std::size_t>(std::count_if(std::begin(queue), std::end(queue), matches_origin)); };
++
++  auto pending = count_in(internal_PQ) + count_in(inflight_tag_check) + count_in(translation_stash);
++  for (const auto* upper : upper_levels)
++    pending += count_in(upper->RQ) + count_in(upper->PQ);
++  return pending;
++}
++
++std::size_t CACHE::count_warmup_prefetch_transactions() const
++{
++  auto is_warmup_prefetch = [](const auto& entry) { return entry.type == access_type::PREFETCH && !entry.prefetch_created_in_roi; };
++  auto is_warmup_prefetch_block = [](const auto& entry) { return entry.valid && entry.prefetch && !entry.prefetch_created_in_roi; };
++
++  return static_cast<std::size_t>(std::count_if(std::begin(MSHR), std::end(MSHR), is_warmup_prefetch)) +
++         static_cast<std::size_t>(std::count_if(std::begin(inflight_fills), std::end(inflight_fills), is_warmup_prefetch)) +
++         static_cast<std::size_t>(std::count_if(std::begin(block), std::end(block), is_warmup_prefetch_block));
++}
+ auto CACHE::matches_address(champsim::address addr) const
+ {
+   return [match = addr.slice_upper(OFFSET_BITS), shamt = OFFSET_BITS](const auto& entry) {
+@@ -223,6 +254,8 @@
+   if (way != set_end) {
+     if (way->valid && way->prefetch) {
+       ++sim_stats.pf_useless;
++      record_prefetch_event(way->prefetch_created_in_roi, &cache_stats::pf_roi_cohort_unused, &cache_stats::pf_warmup_unused_roi);
++      record_prefetch_event(way->prefetch_created_in_roi, &cache_stats::pf_roi_cohort_unused_evicted, &cache_stats::pf_warmup_unused_evicted_roi);
+     }
+ 
+     if (fill.type == access_type::PREFETCH) {
+@@ -254,6 +287,8 @@
+   auto way = std::find_if(set_begin, set_end, [matcher = matches_address(handle_pkt.address)](const auto& x) { return x.valid && matcher(x); });
+   const auto hit = (way != set_end);
+   const auto useful_prefetch = (hit && way->prefetch && !handle_pkt.prefetch_from_this);
++  if (hit && handle_pkt.type == access_type::PREFETCH)
++    ++sim_stats.pf_attempt_hit_existing;
+ 
+   if constexpr (champsim::debug_print) {
+     fmt::print("[{}] {} instr_id: {} address: {} v_address: {} data: {} set: {} way: {} ({}) type: {} cycle: {}\n", NAME, __func__, handle_pkt.instr_id,
+@@ -284,7 +319,14 @@
+     // update prefetch stats and reset prefetch bit
+     if (useful_prefetch) {
+       ++sim_stats.pf_useful;
++      if (handle_pkt.type == access_type::LOAD || handle_pkt.type == access_type::RFO)
++        record_prefetch_event(way->prefetch_created_in_roi, &cache_stats::pf_roi_cohort_timely, &cache_stats::pf_warmup_timely_roi);
++      else {
++        record_prefetch_event(way->prefetch_created_in_roi, &cache_stats::pf_roi_cohort_unused, &cache_stats::pf_warmup_unused_roi);
++        record_prefetch_event(way->prefetch_created_in_roi, &cache_stats::pf_roi_cohort_unused_other, &cache_stats::pf_warmup_unused_other_roi);
++      }
+       way->prefetch = false;
++      way->prefetch_created_in_roi = false;
+     }
+   }
+ 
+@@ -300,6 +342,7 @@
+   fwd_pkt.asid[0] = handle_pkt.asid[0];
+   fwd_pkt.asid[1] = handle_pkt.asid[1];
+   fwd_pkt.type = (handle_pkt.type == access_type::WRITE) ? access_type::RFO : handle_pkt.type;
++  fwd_pkt.prefetch_created_in_roi = handle_pkt.prefetch_created_in_roi;
+   fwd_pkt.pf_metadata = handle_pkt.pf_metadata;
+   fwd_pkt.cpu = handle_pkt.cpu;
+ 
+@@ -340,12 +383,25 @@
+ 
+   if (fill_entry != inflight_fills.end()) // miss or fill already inflight
+   {
++    if (handle_pkt.type == access_type::PREFETCH) {
++      if (fill_entry->type == access_type::PREFETCH)
++        ++sim_stats.pf_attempt_merged_prefetch;
++      else
++        ++sim_stats.pf_attempt_merged_demand;
++    }
++
+     if (fill_entry->type == access_type::PREFETCH && handle_pkt.type != access_type::PREFETCH) {
+-      // Mark the prefetch as useful
++      // Preserve native event semantics while classifying only LOAD/RFO as service demand.
+       if (fill_entry->prefetch_from_this) {
+         ++sim_stats.pf_useful;
+         ++sim_stats.pf_late_useful;
+       }
++      if (handle_pkt.type == access_type::LOAD || handle_pkt.type == access_type::RFO)
++        record_prefetch_event(fill_entry->prefetch_created_in_roi, &cache_stats::pf_roi_cohort_late, &cache_stats::pf_warmup_late_roi);
++      else {
++        record_prefetch_event(fill_entry->prefetch_created_in_roi, &cache_stats::pf_roi_cohort_unused, &cache_stats::pf_warmup_unused_roi);
++        record_prefetch_event(fill_entry->prefetch_created_in_roi, &cache_stats::pf_roi_cohort_unused_other, &cache_stats::pf_warmup_unused_other_roi);
++      }
+     }
+ 
+     // COLLECT STATS
+@@ -354,6 +410,8 @@
+     *fill_entry = fill_type::merge(*fill_entry, to_allocate);
+   } else {
+     if (mshr_full) { // not enough MSHR resource
++      if (handle_pkt.type == access_type::PREFETCH)
++        ++sim_stats.pf_attempt_mshr_rejected;
+       return false;  // TODO should we allow prefetches anyway if they will not be filled to this level?
+     }
+ 
+@@ -361,12 +419,23 @@
+     bool success = send_to_rq ? lower_level->add_rq(mshr_pkt.second) : lower_level->add_pq(mshr_pkt.second);
+ 
+     if (!success) {
++      if (handle_pkt.type == access_type::PREFETCH)
++        ++sim_stats.pf_attempt_lower_queue_rejected;
+       return false;
+     }
+ 
++    if (handle_pkt.type == access_type::PREFETCH && !mshr_pkt.second.response_requested)
++      ++sim_stats.pf_attempt_no_local_fill;
++
+     // Allocate an MSHR
+     if (mshr_pkt.second.response_requested) {
+       MSHR.emplace_back(std::move(mshr_pkt.first));
++      if (handle_pkt.type == access_type::PREFETCH) {
++        if (handle_pkt.prefetch_created_in_roi)
++          ++sim_stats.pf_roi_cohort_created;
++        else if (!warmup)
++          ++sim_stats.pf_warmup_transactions_created_roi;
++      }
+     }
+   }
+ 
+@@ -572,6 +641,10 @@
+   auto inv_way = std::find_if(begin, end, matches_address(inval_addr));
+ 
+   if (inv_way != end) {
++    if (inv_way->valid && inv_way->prefetch) {
++      record_prefetch_event(inv_way->prefetch_created_in_roi, &cache_stats::pf_roi_cohort_unused, &cache_stats::pf_warmup_unused_roi);
++      record_prefetch_event(inv_way->prefetch_created_in_roi, &cache_stats::pf_roi_cohort_unused_invalidated, &cache_stats::pf_warmup_unused_invalidated_roi);
++    }
+     inv_way->valid = false;
+   }
+ 
+@@ -583,12 +656,14 @@
+   ++sim_stats.pf_requested;
+ 
+   if (std::size(internal_PQ) >= PQ_SIZE) {
++    ++sim_stats.pf_attempt_pq_rejected;
+     return false;
+   }
+ 
+   request_type pf_packet;
+   pf_packet.type = access_type::PREFETCH;
+   pf_packet.pf_metadata = prefetch_metadata;
++  pf_packet.prefetch_created_in_roi = !warmup;
+   pf_packet.cpu = cpu;
+   pf_packet.address = pf_addr;
+   pf_packet.v_address = virtual_prefetch ? pf_addr : champsim::address{};
+@@ -863,6 +938,10 @@
+ 
+   roi_stats = new_roi_stats;
+   sim_stats = new_sim_stats;
++  if (!warmup) {
++    sim_stats.pf_warmup_active_transactions_roi_start = count_warmup_prefetch_transactions();
++    sim_stats.pf_warmup_pending_requests_roi_start = count_pending_prefetch_requests(false);
++  }
+ 
+   for (auto* ul : upper_levels) {
+     channel_type::stats_type ul_new_roi_stats;
+@@ -874,21 +953,32 @@
+ 
+ void CACHE::end_phase(unsigned finished_cpu)
+ {
+-  finished_cpu = finished_cpu;
+-  roi_stats.total_miss_latency_cycles = sim_stats.total_miss_latency_cycles;
++  (void)finished_cpu;
++  if (!warmup) {
++    const auto roi_closed = sim_stats.pf_roi_cohort_timely + sim_stats.pf_roi_cohort_late + sim_stats.pf_roi_cohort_unused;
++    if (sim_stats.pf_roi_cohort_created >= roi_closed) {
++      sim_stats.pf_roi_cohort_unresolved_end = sim_stats.pf_roi_cohort_created - roi_closed;
++      sim_stats.pf_roi_cohort_balance_error = 0;
++    } else {
++      sim_stats.pf_roi_cohort_unresolved_end = 0;
++      sim_stats.pf_roi_cohort_balance_error = roi_closed - sim_stats.pf_roi_cohort_created;
++    }
++
++    const auto warmup_created = sim_stats.pf_warmup_active_transactions_roi_start + sim_stats.pf_warmup_transactions_created_roi;
++    const auto warmup_closed = sim_stats.pf_warmup_timely_roi + sim_stats.pf_warmup_late_roi + sim_stats.pf_warmup_unused_roi;
++    if (warmup_created >= warmup_closed) {
++      sim_stats.pf_warmup_unresolved_roi_end = warmup_created - warmup_closed;
++      sim_stats.pf_warmup_cohort_balance_error_roi = 0;
++    } else {
++      sim_stats.pf_warmup_unresolved_roi_end = 0;
++      sim_stats.pf_warmup_cohort_balance_error_roi = warmup_closed - warmup_created;
++    }
++
++    sim_stats.pf_warmup_pending_requests_roi_end = count_pending_prefetch_requests(false);
++    sim_stats.pf_roi_pending_requests_roi_end = count_pending_prefetch_requests(true);
++  }
+ 
+-  roi_stats.hits = sim_stats.hits;
+-  roi_stats.misses = sim_stats.misses;
+-  roi_stats.miss_merge = sim_stats.miss_merge;
+-  roi_stats.fill = sim_stats.fill;
+-
+-  roi_stats.pf_requested = sim_stats.pf_requested;
+-  roi_stats.pf_issued = sim_stats.pf_issued;
+-  roi_stats.pf_useful = sim_stats.pf_useful;
+-  roi_stats.pf_useless = sim_stats.pf_useless;
+-  roi_stats.pf_late_useful = sim_stats.pf_late_useful;
+-  roi_stats.pf_upstream_received = sim_stats.pf_upstream_received;
+-  roi_stats.pf_fill = sim_stats.pf_fill;
++  roi_stats = sim_stats;
+ 
+   for (auto* ul : upper_levels) {
+     ul->roi_stats.RQ_ACCESS = ul->sim_stats.RQ_ACCESS;
+--- a/src/json_printer.cc
++++ b/src/json_printer.cc
+@@ -54,6 +54,35 @@
+   statsmap.emplace("useless prefetch", stats.pf_useless);
+   statsmap.emplace("prefetch fill", stats.pf_fill);
+   statsmap.emplace("upstream prefetch received", stats.pf_upstream_received);
++  statsmap.emplace("prefetch attempt local PQ rejected", stats.pf_attempt_pq_rejected);
++  statsmap.emplace("prefetch attempt hit existing", stats.pf_attempt_hit_existing);
++  statsmap.emplace("prefetch attempt merged with prefetch", stats.pf_attempt_merged_prefetch);
++  statsmap.emplace("prefetch attempt merged with demand", stats.pf_attempt_merged_demand);
++  statsmap.emplace("prefetch attempt MSHR rejected", stats.pf_attempt_mshr_rejected);
++  statsmap.emplace("prefetch attempt lower queue rejected", stats.pf_attempt_lower_queue_rejected);
++  statsmap.emplace("prefetch attempt accepted without local fill", stats.pf_attempt_no_local_fill);
++  statsmap.emplace("ROI prefetch cohort created", stats.pf_roi_cohort_created);
++  statsmap.emplace("ROI prefetch cohort timely useful", stats.pf_roi_cohort_timely);
++  statsmap.emplace("ROI prefetch cohort late useful", stats.pf_roi_cohort_late);
++  statsmap.emplace("ROI prefetch cohort unused", stats.pf_roi_cohort_unused);
++  statsmap.emplace("ROI prefetch cohort unused by eviction", stats.pf_roi_cohort_unused_evicted);
++  statsmap.emplace("ROI prefetch cohort unused by invalidation", stats.pf_roi_cohort_unused_invalidated);
++  statsmap.emplace("ROI prefetch cohort unused by non-demand access", stats.pf_roi_cohort_unused_other);
++  statsmap.emplace("ROI prefetch cohort unresolved at end", stats.pf_roi_cohort_unresolved_end);
++  statsmap.emplace("ROI prefetch cohort balance error", stats.pf_roi_cohort_balance_error);
++  statsmap.emplace("warmup-origin active prefetch transactions at ROI start", stats.pf_warmup_active_transactions_roi_start);
++  statsmap.emplace("warmup-origin pending prefetch requests at ROI start", stats.pf_warmup_pending_requests_roi_start);
++  statsmap.emplace("warmup-origin prefetch transactions created in ROI", stats.pf_warmup_transactions_created_roi);
++  statsmap.emplace("warmup-origin timely useful in ROI", stats.pf_warmup_timely_roi);
++  statsmap.emplace("warmup-origin late useful in ROI", stats.pf_warmup_late_roi);
++  statsmap.emplace("warmup-origin unused in ROI", stats.pf_warmup_unused_roi);
++  statsmap.emplace("warmup-origin unused by eviction in ROI", stats.pf_warmup_unused_evicted_roi);
++  statsmap.emplace("warmup-origin unused by invalidation in ROI", stats.pf_warmup_unused_invalidated_roi);
++  statsmap.emplace("warmup-origin unused by non-demand access in ROI", stats.pf_warmup_unused_other_roi);
++  statsmap.emplace("warmup-origin pending prefetch requests at ROI end", stats.pf_warmup_pending_requests_roi_end);
++  statsmap.emplace("warmup-origin unresolved transactions at ROI end", stats.pf_warmup_unresolved_roi_end);
++  statsmap.emplace("warmup-origin cohort balance error in ROI", stats.pf_warmup_cohort_balance_error_roi);
++  statsmap.emplace("ROI-origin pending prefetch requests at ROI end", stats.pf_roi_pending_requests_roi_end);
+ 
+   uint64_t total_downstream_demands = stats.fill.total();
+   for (std::size_t cpu = 0; cpu < NUM_CPUS; ++cpu)
+--- a/src/plain_printer.cc
++++ b/src/plain_printer.cc
+@@ -120,6 +120,13 @@
+                                 stats.name, stats.pf_requested, stats.pf_issued, stats.pf_useful, stats.pf_late_useful, stats.pf_useless,
+                                 stats.pf_upstream_received));
+ 
++    lines.push_back(fmt::format("cpu{}->{} PREFETCH ATTEMPTS hit:{} merged_pf:{} merged_demand:{} PQ_reject:{} MSHR_reject:{} lower_reject:{} no_local_fill:{}", cpu,
++                                stats.name, stats.pf_attempt_hit_existing, stats.pf_attempt_merged_prefetch, stats.pf_attempt_merged_demand,
++                                stats.pf_attempt_pq_rejected, stats.pf_attempt_mshr_rejected, stats.pf_attempt_lower_queue_rejected,
++                                stats.pf_attempt_no_local_fill));
++    lines.push_back(fmt::format("cpu{}->{} ROI PF COHORT created:{} timely:{} late:{} unused:{} unresolved:{} balance_error:{}", cpu, stats.name,
++                                stats.pf_roi_cohort_created, stats.pf_roi_cohort_timely, stats.pf_roi_cohort_late, stats.pf_roi_cohort_unused,
++                                stats.pf_roi_cohort_unresolved_end, stats.pf_roi_cohort_balance_error));
+     uint64_t total_downstream_demands = total_fill - stats.fill.value_or(std::pair{access_type::PREFETCH, cpu}, fill_value_type{});
+     lines.push_back(
+         fmt::format("cpu{}->{} AVERAGE MISS LATENCY: {} cycles", cpu, stats.name, ::print_ratio(stats.total_miss_latency_cycles, total_downstream_demands)));
