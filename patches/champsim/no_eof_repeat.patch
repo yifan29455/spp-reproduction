@@ -1,0 +1,10 @@
+--- a/src/main.cc
++++ b/src/main.cc
+@@ -113,7 +113,9 @@
+   std::vector<champsim::tracereader> traces;
+   std::transform(
+       std::begin(trace_names), std::end(trace_names), std::back_inserter(traces),
+-      [knob_cloudsuite, repeat = simulation_given, i = uint8_t(0)](auto name) mutable { return get_tracereader(name, i++, knob_cloudsuite, repeat); });
++      // A requested simulation length is a stopping bound, not permission to
++      // replay a finite trace. In particular, short traces must end short.
++      [knob_cloudsuite, i = uint8_t(0)](auto name) mutable { return get_tracereader(name, i++, knob_cloudsuite, false); });
