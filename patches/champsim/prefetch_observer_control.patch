@@ -1,0 +1,210 @@
+--- a/inc/cache_stats.h
++++ b/inc/cache_stats.h
+@@ -20,6 +20,13 @@
+   uint64_t pf_upstream_received = 0;
+   uint64_t pf_fill = 0;
+ 
++  // Ordered hash of CACHE::prefetch_line API candidate requests in this phase.
++  // This common observer is retained in both lifecycle-counter on/off builds.
++  uint64_t pf_request_seq_count = 0;
++  uint64_t pf_request_seq_hash = 14695981039346656037ULL;
++  uint64_t pf_warmup_request_seq_count = 0;
++  uint64_t pf_warmup_request_seq_hash = 14695981039346656037ULL;
++
+   // Prefetch API/request attempts that did not create a new local MSHR transaction.
+   uint64_t pf_attempt_pq_rejected = 0;
+   uint64_t pf_attempt_hit_existing = 0;
+--- a/src/cache_stats.cc
++++ b/src/cache_stats.cc
+@@ -10,6 +10,10 @@
+   result.pf_late_useful = lhs.pf_late_useful - rhs.pf_late_useful;
+   result.pf_upstream_received = lhs.pf_upstream_received - rhs.pf_upstream_received;
+   result.pf_fill = lhs.pf_fill - rhs.pf_fill;
++  result.pf_request_seq_count = lhs.pf_request_seq_count - rhs.pf_request_seq_count;
++  result.pf_request_seq_hash = lhs.pf_request_seq_hash;
++  result.pf_warmup_request_seq_count = lhs.pf_warmup_request_seq_count;
++  result.pf_warmup_request_seq_hash = lhs.pf_warmup_request_seq_hash;
+   result.pf_attempt_pq_rejected = lhs.pf_attempt_pq_rejected - rhs.pf_attempt_pq_rejected;
+   result.pf_attempt_hit_existing = lhs.pf_attempt_hit_existing - rhs.pf_attempt_hit_existing;
+   result.pf_attempt_merged_prefetch = lhs.pf_attempt_merged_prefetch - rhs.pf_attempt_merged_prefetch;
+--- a/src/cache.cc
++++ b/src/cache.cc
+@@ -28,6 +28,12 @@
+ #include "chrono.h"
+ #include "deadlock.h"
+ 
++// CHAMPSIM_PREFETCH_OBSERVER_CONTROL_PATCH: toggle lifecycle bookkeeping only.
++#if defined(CHAMPSIM_DISABLE_PREFETCH_LIFECYCLE_OBSERVER)
++#define CHAMPSIM_OBSERVER_COUNTER(...) do { } while (false)
++#else
++#define CHAMPSIM_OBSERVER_COUNTER(...) do { __VA_ARGS__; } while (false)
++#endif
+ #include "instruction.h"
+ #include "util/algorithm.h"
+ #include "util/bits.h"
+@@ -156,10 +162,16 @@
+ 
+ void CACHE::record_prefetch_event(bool roi_origin, uint64_t cache_stats::* roi_counter, uint64_t cache_stats::* warmup_counter)
+ {
++#if defined(CHAMPSIM_DISABLE_PREFETCH_LIFECYCLE_OBSERVER)
++  (void)roi_origin;
++  (void)roi_counter;
++  (void)warmup_counter;
++#else
+   if (roi_origin)
+     ++(sim_stats.*roi_counter);
+   else if (!warmup)
+     ++(sim_stats.*warmup_counter);
++#endif
+ }
+ 
+ std::size_t CACHE::count_pending_prefetch_requests(bool roi_origin) const
+@@ -289,7 +301,7 @@
+   const auto hit = (way != set_end);
+   const auto useful_prefetch = (hit && way->prefetch && !handle_pkt.prefetch_from_this);
+   if (hit && handle_pkt.type == access_type::PREFETCH)
+-    ++sim_stats.pf_attempt_hit_existing;
++    CHAMPSIM_OBSERVER_COUNTER(++sim_stats.pf_attempt_hit_existing);
+ 
+   if constexpr (champsim::debug_print) {
+     fmt::print("[{}] {} instr_id: {} address: {} v_address: {} data: {} set: {} way: {} ({}) type: {} cycle: {}\n", NAME, __func__, handle_pkt.instr_id,
+@@ -386,9 +398,9 @@
+   {
+     if (handle_pkt.type == access_type::PREFETCH) {
+       if (fill_entry->type == access_type::PREFETCH)
+-        ++sim_stats.pf_attempt_merged_prefetch;
++        CHAMPSIM_OBSERVER_COUNTER(++sim_stats.pf_attempt_merged_prefetch);
+       else
+-        ++sim_stats.pf_attempt_merged_demand;
++        CHAMPSIM_OBSERVER_COUNTER(++sim_stats.pf_attempt_merged_demand);
+     }
+ 
+     if (fill_entry->type == access_type::PREFETCH && handle_pkt.type != access_type::PREFETCH) {
+@@ -412,7 +424,7 @@
+   } else {
+     if (mshr_full) { // not enough MSHR resource
+       if (handle_pkt.type == access_type::PREFETCH)
+-        ++sim_stats.pf_attempt_mshr_rejected;
++        CHAMPSIM_OBSERVER_COUNTER(++sim_stats.pf_attempt_mshr_rejected);
+       return false;  // TODO should we allow prefetches anyway if they will not be filled to this level?
+     }
+ 
+@@ -421,21 +433,21 @@
+ 
+     if (!success) {
+       if (handle_pkt.type == access_type::PREFETCH)
+-        ++sim_stats.pf_attempt_lower_queue_rejected;
++        CHAMPSIM_OBSERVER_COUNTER(++sim_stats.pf_attempt_lower_queue_rejected);
+       return false;
+     }
+ 
+     if (handle_pkt.type == access_type::PREFETCH && !mshr_pkt.second.response_requested)
+-      ++sim_stats.pf_attempt_no_local_fill;
++      CHAMPSIM_OBSERVER_COUNTER(++sim_stats.pf_attempt_no_local_fill);
+ 
+     // Allocate an MSHR
+     if (mshr_pkt.second.response_requested) {
+       MSHR.emplace_back(std::move(mshr_pkt.first));
+       if (handle_pkt.type == access_type::PREFETCH) {
+         if (handle_pkt.prefetch_created_in_roi)
+-          ++sim_stats.pf_roi_cohort_created;
++          CHAMPSIM_OBSERVER_COUNTER(++sim_stats.pf_roi_cohort_created);
+         else if (!warmup)
+-          ++sim_stats.pf_warmup_transactions_created_roi;
++          CHAMPSIM_OBSERVER_COUNTER(++sim_stats.pf_warmup_transactions_created_roi);
+       }
+     }
+   }
+@@ -656,16 +668,30 @@
+ {
+   ++sim_stats.pf_requested;
+ 
++  // FNV-1a-style word mixer over candidate address, fill target, and metadata.
++  // Hash every API attempt before queue admission, so the sequence is comparable
++  // even when a candidate is rejected. The same code is compiled in both builds.
++  sim_stats.pf_request_seq_hash ^= pf_addr.to<uint64_t>();
++  sim_stats.pf_request_seq_hash *= 1099511628211ULL;
++  sim_stats.pf_request_seq_hash ^= static_cast<uint64_t>(fill_this_level);
++  sim_stats.pf_request_seq_hash *= 1099511628211ULL;
++  sim_stats.pf_request_seq_hash ^= static_cast<uint64_t>(prefetch_metadata);
++  sim_stats.pf_request_seq_hash *= 1099511628211ULL;
++  ++sim_stats.pf_request_seq_count;
+ 
+   if (std::size(internal_PQ) >= PQ_SIZE) {
+-    ++sim_stats.pf_attempt_pq_rejected;
++    CHAMPSIM_OBSERVER_COUNTER(++sim_stats.pf_attempt_pq_rejected);
+     return false;
+   }
+ 
+   request_type pf_packet;
+   pf_packet.type = access_type::PREFETCH;
+   pf_packet.pf_metadata = prefetch_metadata;
++#if defined(CHAMPSIM_DISABLE_PREFETCH_LIFECYCLE_OBSERVER)
++  pf_packet.prefetch_created_in_roi = false;
++#else
+   pf_packet.prefetch_created_in_roi = !warmup;
++#endif
+   pf_packet.cpu = cpu;
+   pf_packet.address = pf_addr;
+   pf_packet.v_address = virtual_prefetch ? pf_addr : champsim::address{};
+@@ -938,13 +964,19 @@
+   new_roi_stats.name = NAME;
+   new_sim_stats.name = NAME;
+ 
++  if (!warmup) {
++    new_sim_stats.pf_warmup_request_seq_count = sim_stats.pf_request_seq_count;
++    new_sim_stats.pf_warmup_request_seq_hash = sim_stats.pf_request_seq_hash;
++  }
+ 
+   roi_stats = new_roi_stats;
+   sim_stats = new_sim_stats;
++#if !defined(CHAMPSIM_DISABLE_PREFETCH_LIFECYCLE_OBSERVER)
+   if (!warmup) {
+     sim_stats.pf_warmup_active_transactions_roi_start = count_warmup_prefetch_transactions();
+     sim_stats.pf_warmup_pending_requests_roi_start = count_pending_prefetch_requests(false);
+   }
++#endif
+ 
+   for (auto* ul : upper_levels) {
+     channel_type::stats_type ul_new_roi_stats;
+@@ -957,6 +989,7 @@
+ void CACHE::end_phase(unsigned finished_cpu)
+ {
+   (void)finished_cpu;
++#if !defined(CHAMPSIM_DISABLE_PREFETCH_LIFECYCLE_OBSERVER)
+   if (!warmup) {
+     const auto roi_closed = sim_stats.pf_roi_cohort_timely + sim_stats.pf_roi_cohort_late + sim_stats.pf_roi_cohort_unused;
+     if (sim_stats.pf_roi_cohort_created >= roi_closed) {
+@@ -980,6 +1013,7 @@
+     sim_stats.pf_warmup_pending_requests_roi_end = count_pending_prefetch_requests(false);
+     sim_stats.pf_roi_pending_requests_roi_end = count_pending_prefetch_requests(true);
+   }
++#endif
+ 
+   roi_stats = sim_stats;
+ 
+--- a/src/json_printer.cc
++++ b/src/json_printer.cc
+@@ -70,6 +70,10 @@
+   statsmap.emplace("ROI prefetch cohort unused by non-demand access", stats.pf_roi_cohort_unused_other);
+   statsmap.emplace("ROI prefetch cohort unresolved at end", stats.pf_roi_cohort_unresolved_end);
+   statsmap.emplace("ROI prefetch cohort balance error", stats.pf_roi_cohort_balance_error);
++  statsmap.emplace("prefetch request sequence count", stats.pf_request_seq_count);
++  statsmap.emplace("prefetch request sequence hash", stats.pf_request_seq_hash);
++  statsmap.emplace("warmup prefetch request sequence count", stats.pf_warmup_request_seq_count);
++  statsmap.emplace("warmup prefetch request sequence hash", stats.pf_warmup_request_seq_hash);
+   statsmap.emplace("warmup-origin active prefetch transactions at ROI start", stats.pf_warmup_active_transactions_roi_start);
+   statsmap.emplace("warmup-origin pending prefetch requests at ROI start", stats.pf_warmup_pending_requests_roi_start);
+   statsmap.emplace("warmup-origin prefetch transactions created in ROI", stats.pf_warmup_transactions_created_roi);
+--- a/src/plain_printer.cc
++++ b/src/plain_printer.cc
+@@ -119,6 +119,9 @@
+     lines.push_back(fmt::format("cpu{}->{} PREFETCH REQUESTED: {:10} ISSUED: {:10} USEFUL: {:10} LATE_USEFUL: {:10} USELESS: {:10} UPSTREAM: {:10}", cpu,
+                                 stats.name, stats.pf_requested, stats.pf_issued, stats.pf_useful, stats.pf_late_useful, stats.pf_useless,
+                                 stats.pf_upstream_received));
++    lines.push_back(fmt::format("cpu{}->{} PREFETCH REQUEST SEQUENCE count:{} hash:{} warmup_count:{} warmup_hash:{}", cpu, stats.name,
++                                stats.pf_request_seq_count, stats.pf_request_seq_hash, stats.pf_warmup_request_seq_count,
++                                stats.pf_warmup_request_seq_hash));
+ 
+     lines.push_back(fmt::format("cpu{}->{} PREFETCH ATTEMPTS hit:{} merged_pf:{} merged_demand:{} PQ_reject:{} MSHR_reject:{} lower_reject:{} no_local_fill:{}", cpu,
+                                 stats.name, stats.pf_attempt_hit_existing, stats.pf_attempt_merged_prefetch, stats.pf_attempt_merged_demand,
