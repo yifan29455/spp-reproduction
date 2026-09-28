@@ -1,0 +1,41 @@
+{
+  "run_id": "A3_cpu2006_bwaves_spp_normal_tp0.15_w200M_r1000000000_rep1",
+  "group": "A3",
+  "benchmark": "bwaves",
+  "prefetcher": "spp_t15",
+  "prefetch_threshold": "15",
+  "warmup_instructions": 200000000,
+  "simulation_instructions": 1000000000,
+  "lookahead_enabled": "1",
+  "ghr_enabled": "1",
+  "trace_id": "410.bwaves-1963B.champsimtrace.xz",
+  "started_utc": "2026-09-27T02:59:48.206953+00:00",
+  "ended_utc": "2026-09-27T05:39:09.295348+00:00",
+  "wall_seconds": 9560.144461,
+  "exit_code": 0,
+  "status": "success",
+  "roi_instructions": 1000000001,
+  "roi_cycles": 1044420707,
+  "host": {
+    "hostname": "autodl-container-dc634b8847-b8508e70",
+    "kernel": "5.15.0-112-generic",
+    "machine": "x86_64",
+    "pid": "1802714",
+    "python": "3.10.8"
+  },
+  "bandwidth": "normal",
+  "command": [
+    "/root/spp/spp-reproduction/third_party/ChampSim/build/spp_t15_d256_f04f6ac1495c2/bin/spp-paper",
+    "--hide-heartbeat",
+    "--warmup-instructions",
+    "200000000",
+    "--simulation-instructions",
+    "1000000000",
+    "--json",
+    "/root/spp/spp-reproduction/results/raw/final_cpu2017/A3_cpu2006_bwaves_spp_normal_tp0.15_w200M_r1000000000_rep1/attempt_001/result.json",
+    "/root/spp/spp-reproduction/traces/410.bwaves-1963B.champsimtrace.xz"
+  ],
+  "base_config": "configs/paper_base.json",
+  "result_file": "results/raw/final_cpu2017/A3_cpu2006_bwaves_spp_normal_tp0.15_w200M_r1000000000_rep1/attempt_001/result.json",
+  "baseline_run_id": "A1_cpu2006_bwaves_no_prefetch_normal_tpNA_w200M_r1000000000_rep1"
+}
