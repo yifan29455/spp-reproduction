@@ -1,0 +1,7 @@
+applications,geometric_mean_speedup,group,prefetcher
+8,1.0,A1,no_prefetch
+8,1.7445166075486307,A1,spp
+8,1.66792514148896,A1,bop
+8,1.0,B1,no_prefetch
+8,1.2297888148085707,B1,spp
+8,1.2339182084663778,B1,bop
