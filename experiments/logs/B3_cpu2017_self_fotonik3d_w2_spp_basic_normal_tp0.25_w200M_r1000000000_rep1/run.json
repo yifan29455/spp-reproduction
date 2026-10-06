@@ -1,0 +1,41 @@
+{
+  "run_id": "B3_cpu2017_self_fotonik3d_w2_spp_basic_normal_tp0.25_w200M_r1000000000_rep1",
+  "group": "B3",
+  "benchmark": "fotonik3d_w2",
+  "prefetcher": "spp_basic",
+  "prefetch_threshold": "25",
+  "warmup_instructions": 200000000,
+  "simulation_instructions": 1000000000,
+  "lookahead_enabled": "0",
+  "ghr_enabled": "0",
+  "trace_id": "w2_attempt_001.champsimtrace.xz",
+  "started_utc": "2026-10-05T20:07:38.725024+00:00",
+  "ended_utc": "2026-10-05T21:39:46.207245+00:00",
+  "wall_seconds": 5527.350852,
+  "exit_code": 0,
+  "status": "success",
+  "roi_instructions": 1000000003,
+  "roi_cycles": 613642341,
+  "host": {
+    "hostname": "autodl-container-dc634b8847-b8508e70",
+    "kernel": "5.15.0-112-generic",
+    "machine": "x86_64",
+    "pid": "2515925",
+    "python": "3.10.12"
+  },
+  "bandwidth": "normal",
+  "command": [
+    "/root/spp/spp-reproduction/third_party/ChampSim/build/spp_basic_f04f6ac1495c2/bin/spp-paper",
+    "--hide-heartbeat",
+    "--warmup-instructions",
+    "200000000",
+    "--simulation-instructions",
+    "1000000000",
+    "--json",
+    "/root/spp/spp-reproduction/results/raw/cpu2017_delivery_20261005/primary/B3_cpu2017_self_fotonik3d_w2_spp_basic_normal_tp0.25_w200M_r1000000000_rep1/attempt_001/result.json",
+    "/root/spp/spp-reproduction/work/cpu2017_delivery_20261005/primary/traces/fotonik3d/w2_attempt_001.champsimtrace.xz"
+  ],
+  "base_config": "configs/paper_base.json",
+  "result_file": "results/raw/cpu2017_delivery_20261005/primary/B3_cpu2017_self_fotonik3d_w2_spp_basic_normal_tp0.25_w200M_r1000000000_rep1/attempt_001/result.json",
+  "baseline_run_id": "B1_cpu2017_self_fotonik3d_w2_no_prefetch_normal_tpNA_w200M_r1000000000_rep1"
+}
